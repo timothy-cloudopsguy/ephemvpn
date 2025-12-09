@@ -1,11 +1,10 @@
 # Ephemeral VPN - WireGuard VPN Server with Python API
 
-A Docker-based WireGuard VPN server using wgslirp (userspace WireGuard) that routes ALL traffic through secure VPN tunnels. Designed to work in AWS ECS Fargate without privileged networking permissions. Server configurations and client data are stored in AWS SSM Parameter Store for persistence and security.
+A Docker-based WireGuard VPN server using wgslirp (userspace WireGuard) designed to run in AWS ECS Fargate without privileged networking permissions. Includes a FastAPI-based REST API for managing VPN users and configurations. Server keys and user data are stored in AWS SSM Parameter Store for persistence and security.
 
 ## Features
 
 - **Fargate Compatible**: Uses wgslirp userspace WireGuard - no privileged networking required
-- **Full Traffic Routing**: Routes ALL internet traffic through WireGuard VPN tunnels
 - **WireGuard Protocol**: Modern, secure VPN with state-of-the-art cryptography
 - **REST API**: FastAPI-based management interface for user operations
 - **AWS Integration**: SSM Parameter Store for configuration persistence
@@ -70,7 +69,7 @@ docker build -t ephem-vpn .
 ```bash
 docker run -d \
   --name ephem-vpn \
-  -p 3128:3128/tcp \
+  -p 51820:51820/udp \
   -p 8000:8000/tcp \
   -e AWS_REGION=us-east-1 \
   -e SSM_PREFIX=/ephem-vpn \
@@ -86,9 +85,9 @@ docker run -d \
 | `SSM_PREFIX` | `/ephem-vpn` | Prefix for SSM parameter names |
 | `AWS_REGION` | `us-east-1` | AWS region for SSM operations |
 | `API_PORT` | `8000` | Port for the management API |
-| `PROXY_PORT` | `3128` | Port for the VPN proxy server |
-| `VPN_PROXY_HOST` | `localhost` | Hostname for proxy server (for client configs) |
-| `VPN_PROXY_PORT` | `3128` | Port for proxy server (for client configs) |
+| `WG_LISTEN_PORT` | `51820` | UDP port for WireGuard connections |
+| `WG_MTU` | `1380` | MTU setting for WireGuard interface |
+| `DNS_NAME` | | Optional DNS name for the VPN server endpoint |
 
 ## API Endpoints
 
@@ -147,54 +146,27 @@ curl -X DELETE \
 
 ## How It Works
 
-### VPN Architecture
+### WireGuard VPN Architecture
 
-The solution uses a **hybrid architecture** to achieve full traffic routing while maintaining Fargate compatibility:
+The system runs a standard WireGuard VPN server using wgslirp (userspace WireGuard implementation) that can run in AWS ECS Fargate without privileged networking permissions.
 
-1. **Fargate Proxy Server**: HTTP CONNECT proxy server in ECS Fargate (unprivileged)
-2. **Local VPN Client**: Creates TUN device and captures ALL system traffic (requires root on local machine)
-3. **Traffic Flow**: Local client tunnels all captured packets through HTTP CONNECT to Fargate proxy
+**Key Components:**
+1. **wgslirp WireGuard Server**: Userspace WireGuard implementation that handles VPN connections
+2. **FastAPI Management API**: REST API for creating and managing VPN user configurations
+3. **SSM Parameter Store**: Secure storage for server keys, user keys, and configuration data
 
-### Full Traffic Routing
-
-The local VPN client captures **ALL traffic** on your laptop:
-
-1. **TUN Device Creation**: Creates virtual network interface (requires root)
-2. **System Routing**: Sets default route through TUN device - **ALL traffic is captured**
-3. **Packet Tunneling**: Each TCP/UDP packet is tunneled through HTTP CONNECT
-4. **Destination Routing**: Fargate proxy forwards traffic to final destinations
-
-**What gets routed:**
-- ✅ Web browsing (HTTP/HTTPS)
-- ✅ Email, messaging apps
-- ✅ DNS queries
-- ✅ Gaming traffic
-- ✅ Video streaming
-- ✅ ALL internet traffic
-
-### Client Setup
-
-**For FULL traffic routing (recommended):**
-
-```bash
-# 1. Backup your current routing
-sudo ./setup-routing.sh backup
-
-# 2. Start VPN with automatic routing setup
-sudo ./setup-routing.sh start your-vpn-server.com 3128
-
-# ALL traffic on your laptop now goes through the VPN!
-# Press Ctrl+C to stop and automatically restore routing
+**VPN Connection Flow:**
+```
+Client Device → WireGuard UDP/51820 → wgslirp Server → Internet
+Client Device ← Encrypted Response ← wgslirp Server ← Internet
 ```
 
-**Alternative: Manual routing setup**
-```bash
-# Set up routing manually
-sudo ./setup-routing.sh setup
+### User Management
 
-# Start VPN client
-sudo python3 vpn-client.py your-vpn-server.com 3128
-```
+- Users are created via the REST API with individual WireGuard keypairs
+- Each user gets a unique IP address in the VPN subnet (10.77.0.0/24)
+- Client configurations are generated automatically with proper peer settings
+- All user data is encrypted and stored in AWS SSM Parameter Store
 
 ## SSM Parameter Store Structure
 
@@ -281,11 +253,11 @@ python3 vpn-client.py create your-username
 
 ### 5. Connect to VPN
 ```bash
-# Connect - this routes ALL traffic through WireGuard VPN
+# Connect using WireGuard
 python3 vpn-client.py connect your-username
 
-# Verify connection
-curl https://httpbin.org/ip  # Should show VPN server IP
+# Verify connection - check if your IP has changed
+curl https://httpbin.org/ip
 ```
 
 ### 6. Disconnect
@@ -295,60 +267,52 @@ python3 vpn-client.py disconnect your-username
 
 ## Security Notes
 
-- API key is auto-generated on first run
-- All sensitive data is stored encrypted in SSM
-- HTTP CONNECT tunneling provides transport-level security
+- Master API key is auto-generated on first container startup
+- All sensitive data (keys, API keys) is stored encrypted in SSM Parameter Store
+- WireGuard provides end-to-end encryption for VPN traffic
 - No privileged operations required in Fargate container
-- Traffic is encrypted in transit via HTTPS when connecting to destinations
-- Local VPN client requires root privileges (normal for VPN software)
-- All traffic routing happens at network level - comprehensive but requires trust in VPN server
-- ICMP is enabled via a hacked up MITM tweak to wgslirp.
+- Server uses wgslirp userspace WireGuard - no kernel modules needed
+- Client connections require standard WireGuard tools and root privileges for interface management
+- ICMP (ping) support is enabled via wgslirp modifications
 
 ## Troubleshooting
 
 ### Container won't start
-- Check IAM permissions
-- Verify SSM parameters exist
+- Check IAM permissions for SSM access
+- Verify AWS credentials are configured
 - Check container logs: `docker logs ephem-vpn`
+- Ensure UDP port 51820 is not blocked by firewall
 
-### Proxy connection fails
-- Verify proxy server is accessible on port 3128
-- Check that HTTP CONNECT requests are not blocked by firewalls
-- Ensure client is sending proper CONNECT requests
+### API returns 401 Unauthorized
+- Check that the master API key exists in SSM: `aws ssm get-parameter --name "/ephem-vpn/master-api-key"`
+- Ensure `Authorization: Bearer <api-key>` header is included in requests
+- Verify the API key is correct and not expired
 
-### Traffic not routing through VPN
-- Verify system proxy settings are configured correctly
-- Check that applications respect proxy settings
-- Consider using proxychains/tsocks for applications that don't support proxies
+### WireGuard connection fails
+- Ensure WireGuard tools are installed: `wg --version`
+- Check that UDP port 51820 is accessible on the VPN server
+- Verify the WireGuard configuration file is correct
+- Run `wg show` to check interface status
 
-### API returns 401
-- Check API key in SSM parameter `/{SSM_PREFIX}/api-key`
-- Ensure `Authorization: Bearer <key>` header is correct
+### Cannot connect to VPN server
+- Verify the server endpoint (IP/DNS) is correct in the config
+- Check that the server's public key matches what's in the client config
+- Ensure your firewall allows outbound UDP connections
+- Try connecting from a different network to rule out local firewall issues
 
-### VPN client fails to start
-- Make sure you're running as root: `sudo python vpn-client.py ...`
-- Check that TUN device can be created: `ls -la /dev/net/tun`
-- Verify proxy server is accessible and responding
-
-### Traffic not routing through VPN
-- Check routing table: `ip route show` (should show default via tun0)
-- Verify TUN interface is up: `ip addr show tun0`
-- Test proxy connectivity: `./setup-routing.sh test host port`
-- Check that applications aren't using cached DNS
-
-### Cannot restore original routing
-- Manual restore: `sudo ip route del default dev tun0; sudo ip route add default via <original-gateway> dev <interface>`
-- Check backup file: `cat /tmp/vpn-routing-backup.txt`
-- Restart networking: `sudo systemctl restart networking` (Linux) or reboot
+### DNS resolution issues
+- Check that DNS servers are configured correctly in the WireGuard config
+- Verify that DNS queries are working: `nslookup google.com`
+- Try using different DNS servers (8.8.8.8, 1.1.1.1)
 
 ## Limitations
 
 ### Current Implementation Notes
-- **TCP/UDP Only**: Currently handles TCP and UDP traffic. ICMP (ping) and other protocols may not work perfectly
-- **IPv4 Only**: Designed for IPv4 traffic. IPv6 support would require additional implementation
-- **Connection Tracking**: Each TCP/UDP flow creates a separate HTTP CONNECT tunnel
-- **Performance**: HTTP CONNECT tunneling adds latency compared to direct VPN protocols
-- **DNS**: DNS queries are routed through the VPN (no local DNS leaks)
+- **TCP/UDP Focus**: Optimized for TCP and UDP traffic, with ICMP support via wgslirp modifications
+- **IPv4 Only**: Currently designed for IPv4 traffic. IPv6 support would require additional development
+- **Userspace WireGuard**: Uses wgslirp for Fargate compatibility - performance characteristics may differ from kernel WireGuard
+- **Single Container**: Both VPN server and API run in the same container process
+- **DNS**: DNS queries are routed through the VPN tunnel for privacy
 
 ### Future Improvements
 - IPv6 support
@@ -364,7 +328,7 @@ python3 vpn-client.py disconnect your-username
 # Install dependencies
 poetry install
 
-# Run API and proxy server locally
+# Run API server locally (WireGuard server requires container environment)
 uvicorn api.main:app --host 0.0.0.0 --port 8000
 ```
 
@@ -398,20 +362,18 @@ curl https://httpbin.org/ip  # Should show VPN server IP, not your real IP
 .
 ├── Dockerfile              # Multi-stage container build (wgslirp + API)
 ├── entrypoint.sh          # Container startup script
-├── keygen.sh              # WireGuard key generation script
-├── vpn-client.py          # WireGuard VPN client manager
-├── setup-routing.sh       # Legacy routing setup script
+├── keygen.sh              # WireGuard key generation utility
+├── vpn-client.py          # WireGuard VPN client management tool
 ├── pyproject.toml         # Python dependencies
 ├── poetry.lock           # Locked dependency versions
 ├── api/
-│   └── main.py           # FastAPI application with WireGuard key management
+│   └── main.py           # FastAPI application with WireGuard user management
 ├── terraform/            # Infrastructure as Code
 │   ├── main.tf           # Main configuration with module composition
 │   ├── locals.tf         # Property file loading
 │   ├── modules/
-│   │   ├── ecs_cluster/     # Shared cluster and execution role
-│   │   ├── ecs/             # Service-specific resources
-│   │   └── ecs_one_shot/    # One-shot task execution
+│   │   ├── ecs_cluster/     # Shared ECS cluster and execution role
+│   │   └── ecs/             # ECS service configuration
 │   └── properties.dev.json # Environment configuration
 ├── ssm-examples.json     # SSM parameter examples
 └── README.md             # This file
