@@ -1,0 +1,34 @@
+{
+    "app_name": "ephemVpn",
+    "ecr": {
+        "repository_region": "us-east-2",
+        "repository_account": "008851086387",
+        "repository_name": "ephem/vpn"
+    },
+    "route53": {
+        "domain_name": "dev.lockbx.co",
+        "short_domain": "dev.lockbx.co",
+        "ttl": 60
+    },
+    "ecs": {
+        "fargate_cpu": "256",
+        "fargate_memory": "512",
+        "desired_count": 1,
+        "capacity_provider_strategy": [
+            {
+                "capacity_provider": "FARGATE_SPOT",
+                "weight": 1
+            }
+        ],
+        "runtime_platform": {
+            "cpu_architecture": "ARM64",
+            "operating_system_family": "LINUX"
+        }
+    },
+    "wireguard": {
+        "listen_port": 51820,
+        "mtu": 1380,
+        "server_ip": "10.0.0.1/24",
+        "routes": "0.0.0.0/0"
+    }
+}
