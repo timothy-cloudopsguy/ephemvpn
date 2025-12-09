@@ -28,17 +28,11 @@ The Terraform configuration is organized into modular components for better main
    - Handles CloudWatch logging configuration
    - Each service gets its own isolated resources
 
-3. **`ecs_one_shot`**: One-time task execution
-   - Creates ECS service with `desired_count = 0`
-   - Triggers tasks based on configuration changes (SHA256 hash)
-   - Perfect for key generation, migrations, setup tasks
-
 **Benefits:**
 - **Separation of Concerns**: Cluster, service, and task infrastructure
 - **Reusability**: Multiple services can share the same cluster
 - **Security**: Each service has minimal required permissions
 - **Maintainability**: Easier to update and manage components
-- **Automation**: One-shot tasks run automatically on config changes
 
 ### Container Services
 
@@ -299,39 +293,6 @@ curl https://httpbin.org/ip  # Should show VPN server IP
 python3 vpn-client.py disconnect your-username
 ```
 
-## Key Generation
-
-WireGuard keys are automatically generated using a one-shot ECS task:
-
-### Automatic Key Generation
-- **Trigger**: SHA256 hash of `terraform/keygen-config.json`
-- **Process**: One-shot ECS task runs keygen container
-- **Storage**: Keys saved to SSM Parameter Store (base64 encoded)
-- **Timing**: Runs before main service deployment
-
-### Manual Key Regeneration
-To regenerate keys, modify `terraform/keygen-config.json`:
-```json
-{
-  "ssm_prefix": "/ephem-vpn",
-  "key_algorithm": "curve25519",
-  "key_purpose": "wireguard-server",
-  "regenerate_keys": true
-}
-```
-
-Then run:
-```bash
-terraform apply  # Will trigger keygen due to config change
-```
-
-### Key Storage in SSM
-- `/ephem-vpn/wg/server-private-key-b64` - Base64 encoded private key
-- `/ephem-vpn/wg/server-public-key-b64` - Base64 encoded public key
-- `/ephem-vpn/wg/server-private-key` - Plain private key
-- `/ephem-vpn/wg/server-public-key` - Plain public key
-- `/ephem-vpn/wg/server-key-metadata` - Generation metadata
-
 ## Security Notes
 
 - API key is auto-generated on first run
@@ -341,6 +302,7 @@ terraform apply  # Will trigger keygen due to config change
 - Traffic is encrypted in transit via HTTPS when connecting to destinations
 - Local VPN client requires root privileges (normal for VPN software)
 - All traffic routing happens at network level - comprehensive but requires trust in VPN server
+- ICMP is enabled via a hacked up MITM tweak to wgslirp.
 
 ## Troubleshooting
 
